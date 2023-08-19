@@ -1,9 +1,9 @@
 module github.com/nasa9084/switchbot-exporter
 
-go 1.19
+go 1.21
 
 require (
-	github.com/nasa9084/go-switchbot/v3 v3.0.1
+	github.com/nasa9084/go-switchbot/v3 v3.0.2-0.20230814093012-b3a3a5d29e2b
 	github.com/prometheus/client_golang v1.16.0
 )
 
