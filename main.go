@@ -134,6 +134,31 @@ func run() error {
 
 			meterHumidity.WithLabelValues(status.ID).Set(float64(status.Humidity))
 			meterTemperature.WithLabelValues(status.ID).Set(status.Temperature)
+		case switchbot.Hub2:
+			meterHumidity := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "switchbot",
+				Subsystem: "meter",
+				Name:      "humidity",
+			}, []string{"device_id"})
+
+			meterTemperature := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "switchbot",
+				Subsystem: "meter",
+				Name:      "temperature",
+			}, []string{"device_id"})
+
+			meterLightLevel := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "switchbot",
+				Subsystem: "meter",
+				Name:      "light_level",
+			}, []string{"device_id"})
+
+			registry.MustRegister(deviceLabels) // register global device labels cache
+			registry.MustRegister(meterHumidity, meterTemperature, meterLightLevel)
+
+			meterHumidity.WithLabelValues(status.ID).Set(float64(status.Humidity))
+			meterTemperature.WithLabelValues(status.ID).Set(status.Temperature)
+			meterLightLevel.WithLabelValues(status.ID).Set(float64(status.LightLevel))
 		case switchbot.PlugMiniJP:
 			plugWeight := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Namespace: "switchbot",
