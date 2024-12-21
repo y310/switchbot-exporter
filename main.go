@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,7 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	switchbot "github.com/nasa9084/go-switchbot/v3"
+	switchbot "github.com/nasa9084/go-switchbot/v4"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -27,6 +28,12 @@ var deviceLabels = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "switchbot",
 	Name:      "device",
 }, []string{"device_id", "device_name"})
+
+// the type expected by the prometheus http service discovery
+type StaticConfig struct {
+	Targets []string          `json:"targets"`
+	Labels  map[string]string `json:"labels"`
+}
 
 func main() {
 	flag.Parse()
@@ -86,6 +93,53 @@ func run() error {
 		}
 	}()
 
+	http.HandleFunc("/discover", func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("discovering devices...")
+		devices, _, err := sc.Device().List(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to discover devices: %s", err), http.StatusInternalServerError)
+			return
+		}
+		log.Printf("discovered device count: %d", len(devices))
+
+		supportedDeviceTypes := map[switchbot.PhysicalDeviceType]struct{}{
+			switchbot.Hub2:        {},
+			switchbot.Humidifier:  {},
+			switchbot.Meter:       {},
+			switchbot.MeterPlus:   {},
+			switchbot.MeterPro:    {},
+			switchbot.MeterProCO2: {},
+			switchbot.PlugMiniJP:  {},
+			switchbot.WoIOSensor:  {},
+		}
+
+		data := make([]StaticConfig, len(devices))
+
+		for i, device := range devices {
+			_, deviceTypeIsSupported := supportedDeviceTypes[device.Type]
+			if !deviceTypeIsSupported {
+				log.Printf("ignoring device %s with unsupported type: %s", device.ID, device.Type)
+				continue
+			}
+
+			log.Printf("discovered device %s of type %s", device.ID, device.Type)
+			staticConfig := StaticConfig{}
+			staticConfig.Targets = make([]string, 1)
+			staticConfig.Labels = make(map[string]string)
+
+			staticConfig.Targets[0] = device.ID
+			staticConfig.Labels["device_id"] = device.ID
+			staticConfig.Labels["device_name"] = device.Name
+			staticConfig.Labels["device_type"] = string(device.Type)
+
+			data[i] = staticConfig
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(data)
+	})
+
 	http.HandleFunc("/-/reload", func(w http.ResponseWriter, r *http.Request) {
 		if expectMethod := http.MethodPost; r.Method != expectMethod {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -109,14 +163,16 @@ func run() error {
 			return
 		}
 
+		log.Printf("getting device status: %s", target)
 		status, err := sc.Device().Status(r.Context(), target)
 		if err != nil {
 			log.Printf("getting device status: %v", err)
 			return
 		}
+		log.Printf("got device status: %s", target)
 
 		switch status.Type {
-		case switchbot.Meter, switchbot.MeterPlus:
+		case switchbot.Meter, switchbot.MeterPlus, switchbot.MeterPro, switchbot.WoIOSensor, switchbot.Humidifier:
 			meterHumidity := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Namespace: "switchbot",
 				Subsystem: "meter",
@@ -159,6 +215,31 @@ func run() error {
 			meterHumidity.WithLabelValues(status.ID).Set(float64(status.Humidity))
 			meterTemperature.WithLabelValues(status.ID).Set(status.Temperature)
 			meterLightLevel.WithLabelValues(status.ID).Set(float64(status.LightLevel))
+		case switchbot.MeterProCO2:
+			meterCO2 := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "switchbot",
+				Subsystem: "meter",
+				Name:      "CO2",
+			}, []string{"device_id"})
+
+			meterHumidity := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "switchbot",
+				Subsystem: "meter",
+				Name:      "humidity",
+			}, []string{"device_id"})
+
+			meterTemperature := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "switchbot",
+				Subsystem: "meter",
+				Name:      "temperature",
+			}, []string{"device_id"})
+
+			registry.MustRegister(deviceLabels) // register global device labels cache
+			registry.MustRegister(meterCO2, meterHumidity, meterTemperature)
+
+			meterCO2.WithLabelValues(status.ID).Set(float64(status.CO2))
+			meterHumidity.WithLabelValues(status.ID).Set(float64(status.Humidity))
+			meterTemperature.WithLabelValues(status.ID).Set(status.Temperature)
 		case switchbot.PlugMiniJP:
 			plugWeight := prometheus.NewGaugeVec(prometheus.GaugeOpts{
 				Namespace: "switchbot",
@@ -183,6 +264,8 @@ func run() error {
 			plugWeight.WithLabelValues(status.ID).Set(status.Weight)
 			plugVoltage.WithLabelValues(status.ID).Set(status.Voltage)
 			plugElectricCurrent.WithLabelValues(status.ID).Set(status.ElectricCurrent)
+		default:
+			log.Printf("unrecognized device type: %s", status.Type)
 		}
 
 		promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(w, r)
@@ -216,6 +299,7 @@ func reloadDevices(sc *switchbot.Client) error {
 	if err != nil {
 		return fmt.Errorf("getting device list: %w", err)
 	}
+	log.Print("got device list")
 
 	for _, device := range devices {
 		deviceLabels.WithLabelValues(device.ID, device.Name).Set(0)
